@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIS Marine Radar Live v3.3 Debug</title>
+
+<style>
+body{
+    margin:0;
+    background:#081018;
+    color:#00ffcc;
+    font-family:Arial,sans-serif;
+    overflow:hidden;
+}
+#topbar{
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    background:#102030;
+    padding:10px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    z-index:100;
+}
+button,select,input{
+    background:#183040;
+    color:#00ffcc;
+    border:1px solid #00ffcc;
+    padding:8px;
+    border-radius:5px;
+}
+#radarCanvas{
+    width:100vw;
+    height:100vh;
+    display:block;
+}
+.panel{
+    position:absolute;
+    background:rgba(0,0,0,0.85);
+    border:1px solid #00ffcc;
+    border-radius:10px;
+    padding:10px;
+    overflow:auto;
+}
+#targets{
+    right:10px;
+    top:80px;
+    width:280px;
+    max-height:42vh;
+}
+#debug{
+    right:10px;
+    bottom:10px;
+    width:280px;
+    max-height:35vh;
+    font-size:11px;
+    color:#ffaa66;
+}
+#status{
+    left:10px;
+    bottom:10px;
+    width:280px;
+    font-size:12px;
+}
+.card{
+    border-bottom:1px solid #00ffcc;
+    margin-bottom:8px;
+    padding-bottom:8px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="topbar">
+<strong>AIS Marine Radar v3.3 Debug</strong>
+
+<select id="range">
+<option value="1">1 NM</option>
+<option value="5">5 NM</option>
+<option value="10">10 NM</option>
+<option value="25" selected>25 NM</option>
+<option value="100">100 NM</option>
+</select>
+
+<button id="gpsBtn">Acquire GPS</button>
+<button id="simBtn">Simulation ON</button>
+<button id="liveBtn">Live AIS OFF</button>
+
+<button id="showAllBtn">Show ALL OFF</button>
+
+<input id="apiKey" type="password" placeholder="AISStream API Key">
+</div>
+
+<canvas id="radarCanvas"></canvas>
+
+<div id="targets" class="panel">
+<h3>Targets</h3>
+<div id="targetList"></div>
+</div>
+
+<div id="debug" class="panel">
+<h3>Debug Console</h3>
+<div id="debugText"></div>
+</div>
+
+<div id="status" class="panel">
+Status: Ready
+</div>
+
+<script>
+
+const canvas=document.getElementById('radarCanvas');
+const ctx=canvas.getContext('2d');
+
+const targetList=document.getElementById('targetList');
+const debugText=document.getElementById('debugText');
+const statusBox=document.getElementById('status');
+
+let w,h,cx,cy;
+
+let simulation=true;
+let liveAIS=false;
+let showAll=false;
+
+let userPos=null;
+let socket=null;
+
+let targets=[];
+
+let msgCount=0;
+let decodeCount=0;
+let plottedCount=0;
+
+function resize(){
+
+    canvas.width=window.innerWidth;
+    canvas.height=window.innerHeight;
+
+    w=canvas.width;
+    h=canvas.height;
+
+    cx=w/2;
+    cy=h/2;
+}
+
+window.addEventListener('resize',resize);
+resize();
+
+function logDebug(msg){
+
+    const div=document.createElement('div');
+    div.innerHTML=msg;
+
+    debugText.prepend(div);
+
+    while(debugText.children.length>40){
+        debugText.removeChild(debugText.lastChild);
+    }
+}
+
+function setStatus(){
+
+    statusBox.innerHTML=`
+    Messages: ${msgCount}<br>
+    Decoded: ${decodeCount}<br>
+    Plotted: ${plottedCount}<br>
+    Targets: ${targets.length}<br>
+    GPS: ${userPos ? "OK" : "NONE"}<br>
+    Live AIS: ${liveAIS ? "CONNECTED" : "OFF"}
+    `;
+}
+
+function saveSettings(){
+
+    localStorage.setItem(
+        "ais_api_key",
+        document.getElementById('apiKey').value
+    );
+
+    localStorage.setItem(
+        "ais_range",
+        document.getElementById('range').value
+    );
+}
+
+function loadSettings(){
+
+    const key=localStorage.getItem("ais_api_key");
+    const range=localStorage.getItem("ais_range");
+
+    if(key){
+        document.getElementById('apiKey').value=key;
+    }
+
+    if(range){
+        document.getElementById('range').value=range;
+    }
+}
+
+loadSettings();
+
+document.getElementById('apiKey').addEventListener('change',saveSettings);
+document.getElementById('range').addEventListener('change',saveSettings);
+
+function generateSimTargets(){
+
+    targets=[];
+
+    const max=parseFloat(document.getElementById('range').value);
+
+    for(let i=0;i<10;i++){
+
+        targets.push({
+            id:"SIM"+i,
+            name:"Sim Vessel "+i,
+            distance:Math.random()*max,
+            bearing:Math.random()*360,
+            speed:(Math.random()*20)+2,
+            course:Math.random()*360,
+            timestamp:Date.now()
+        });
+    }
+}
+
+generateSimTargets();
+
+function drawRadar(){
+
+    ctx.fillStyle="#081018";
+    ctx.fillRect(0,0,w,h);
+
+    const radius=Math.min(w,h)*0.38;
+
+    ctx.strokeStyle="#00ff88";
+
+    for(let i=1;i<=5;i++){
+
+        ctx.beginPath();
+        ctx.arc(cx,cy,radius*(i/5),0,Math.PI*2);
+        ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(cx-radius,cy);
+    ctx.lineTo(cx+radius,cy);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(cx,cy-radius);
+    ctx.lineTo(cx,cy+radius);
+    ctx.stroke();
+
+    ctx.fillStyle="#ffffff";
+
+    ctx.beginPath();
+    ctx.arc(cx,cy,7,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.fillText("YOUR BOAT",cx+10,cy-10);
+
+    targetList.innerHTML="";
+
+    const maxRange=parseFloat(document.getElementById('range').value);
+
+    plottedCount=0;
+
+    targets.forEach(t=>{
+
+        if(!showAll && t.distance>maxRange) return;
+
+        plottedCount++;
+
+        const rr=(Math.min(t.distance,maxRange)/maxRange)*radius;
+
+        const rad=(t.bearing-90)*(Math.PI/180);
+
+        const x=cx+Math.cos(rad)*rr;
+        const y=cy+Math.sin(rad)*rr;
+
+        ctx.fillStyle="#00ff00";
+
+        ctx.beginPath();
+        ctx.arc(x,y,5,0,Math.PI*2);
+        ctx.fill();
+
+        ctx.strokeStyle="#00ff00";
+
+        ctx.beginPath();
+        ctx.moveTo(x,y);
+
+        const vrad=(t.course-90)*(Math.PI/180);
+
+        ctx.lineTo(
+            x+Math.cos(vrad)*18,
+            y+Math.sin(vrad)*18
+        );
+
+        ctx.stroke();
+
+        ctx.fillStyle="#ffffff";
+        ctx.fillText(t.name,x+8,y);
+
+        const div=document.createElement('div');
+        div.className="card";
+
+        div.innerHTML=`
+        <strong>${t.name}</strong><br>
+        Dist: ${t.distance.toFixed(2)} nm<br>
+        Brg: ${Math.round(t.bearing)}°<br>
+        Spd: ${Number(t.speed).toFixed(1)} kn
+        `;
+
+        targetList.appendChild(div);
+
+    });
+
+    setStatus();
+}
+
+function animate(){
+
+    drawRadar();
+
+    if(simulation){
+
+        targets.forEach(t=>{
+            t.bearing+=0.05;
+            if(t.bearing>360)t.bearing-=360;
+        });
+    }
+
+    requestAnimationFrame(animate);
+}
+
+animate();
+
+document.getElementById('gpsBtn').addEventListener('click',()=>{
+
+    navigator.geolocation.getCurrentPosition(pos=>{
+
+        userPos={
+            lat:pos.coords.latitude,
+            lon:pos.coords.longitude
+        };
+
+        logDebug(
+            "GPS OK "+
+            userPos.lat.toFixed(5)+","+
+            userPos.lon.toFixed(5)
+        );
+
+        setStatus();
+
+    },err=>{
+
+        alert("GPS failed");
+
+    },{
+        enableHighAccuracy:true
+    });
+
+});
+
+document.getElementById('simBtn').addEventListener('click',()=>{
+
+    simulation=!simulation;
+
+    document.getElementById('simBtn').textContent=
+        simulation ? "Simulation ON" : "Simulation OFF";
+
+    if(!simulation){
+        targets=[];
+    }else{
+        generateSimTargets();
+    }
+
+});
+
+document.getElementById('showAllBtn').addEventListener('click',()=>{
+
+    showAll=!showAll;
+
+    document.getElementById('showAllBtn').textContent=
+        showAll ? "Show ALL ON" : "Show ALL OFF";
+
+});
+
+document.getElementById('liveBtn').addEventListener('click',()=>{
+
+    if(liveAIS){
+
+        liveAIS=false;
+
+        document.getElementById('liveBtn').textContent="Live AIS OFF";
+
+        if(socket){
+            socket.close();
+            socket=null;
+        }
+
+        return;
+    }
+
+    startAIS();
+
+});
+
+function startAIS(){
+
+    const key=document.getElementById('apiKey').value.trim();
+
+    if(!key){
+        alert("Enter API key");
+        return;
+    }
+
+    if(!userPos){
+        alert("Acquire GPS first");
+        return;
+    }
+
+    saveSettings();
+
+    simulation=false;
+    liveAIS=true;
+
+    targets=[];
+
+    document.getElementById('simBtn').textContent="Simulation OFF";
+    document.getElementById('liveBtn').textContent="Live AIS ON";
+
+    msgCount=0;
+    decodeCount=0;
+
+    socket=new WebSocket("wss://stream.aisstream.io/v0/stream");
+
+    socket.onopen=()=>{
+
+        logDebug("AIS CONNECTED");
+
+        const lat=userPos.lat;
+        const lon=userPos.lon;
+
+        const sub={
+            APIKey:key,
+            BoundingBoxes:[[
+                [lat-2,lon-2],
+                [lat+2,lon+2]
+            ]]
+        };
+
+        socket.send(JSON.stringify(sub));
+
+    };
+
+    socket.onerror=()=>{
+
+        logDebug("SOCKET ERROR");
+
+    };
+
+    socket.onclose=()=>{
+
+        logDebug("AIS CLOSED");
+
+    };
+
+    socket.onmessage=(event)=>{
+
+        try{
+
+            msgCount++;
+
+            const data=JSON.parse(event.data);
+
+            if(msgCount<5){
+                logDebug("RAW MSG RECEIVED");
+            }
+
+            const meta=data.MetaData || {};
+            const message=data.Message || {};
+
+            let pr=
+                message.PositionReport ||
+                message.StandardClassBPositionReport ||
+                message.ExtendedClassBPositionReport;
+
+            if(!pr){
+                return;
+            }
+
+            decodeCount++;
+
+            const lat=
+                meta.latitude ??
+                pr.Latitude ??
+                pr.Lat ??
+                pr.latitude;
+
+            const lon=
+                meta.longitude ??
+                pr.Longitude ??
+                pr.Lon ??
+                pr.longitude;
+
+            if(lat===undefined || lon===undefined){
+
+                logDebug("NO COORDS");
+
+                return;
+            }
+
+            const dist=distanceNM(
+                userPos.lat,
+                userPos.lon,
+                lat,
+                lon
+            );
+
+            const bearing=calculateBearing(
+                userPos.lat,
+                userPos.lon,
+                lat,
+                lon
+            );
+
+            const vessel={
+                id:
+                    pr.UserID ||
+                    meta.MMSI ||
+                    Math.random(),
+
+                name:
+                    meta.ShipName ||
+                    pr.ShipName ||
+                    ("MMSI "+(
+                        pr.UserID ||
+                        meta.MMSI ||
+                        "Unknown"
+                    )),
+
+                distance:dist,
+                bearing:bearing,
+
+                speed:
+                    pr.Sog ||
+                    pr.SpeedOverGround ||
+                    0,
+
+                course:
+                    pr.Cog ||
+                    pr.CourseOverGround ||
+                    0,
+
+                timestamp:Date.now()
+            };
+
+            const existing=targets.findIndex(
+                t=>t.id===vessel.id
+            );
+
+            if(existing>=0){
+                targets[existing]=vessel;
+            }else{
+                targets.push(vessel);
+            }
+
+            if(decodeCount<10){
+
+                logDebug(
+                    "VESSEL: "+
+                    vessel.name+
+                    " "+
+                    vessel.distance.toFixed(1)+"nm"
+                );
+            }
+
+        }catch(err){
+
+            logDebug("PARSE ERROR");
+
+        }
+
+    };
+
+}
+
+function distanceNM(lat1,lon1,lat2,lon2){
+
+    const R=6371e3;
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dp=(lat2-lat1)*Math.PI/180;
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const a=
+        Math.sin(dp/2)*Math.sin(dp/2)+
+        Math.cos(p1)*Math.cos(p2)*
+        Math.sin(dl/2)*Math.sin(dl/2);
+
+    const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+
+    return (R*c)/1852;
+
+}
+
+function calculateBearing(lat1,lon1,lat2,lon2){
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const y=Math.sin(dl)*Math.cos(p2);
+
+    const x=
+        Math.cos(p1)*Math.sin(p2)-
+        Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+
+    let brng=Math.atan2(y,x)*180/Math.PI;
+
+    brng=(brng+360)%360;
+
+    return brng;
+
+}
+
+</script>
+
+</body>
+</html>
