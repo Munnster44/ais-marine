@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIS Marine Radar Live v3.4</title>
+
+<style>
+body{
+    margin:0;
+    background:#081018;
+    color:#00ffcc;
+    font-family:Arial,sans-serif;
+    overflow:hidden;
+}
+#topbar{
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    background:#102030;
+    padding:10px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    z-index:100;
+}
+button,select,input{
+    background:#183040;
+    color:#00ffcc;
+    border:1px solid #00ffcc;
+    padding:8px;
+    border-radius:5px;
+}
+#radarCanvas{
+    width:100vw;
+    height:100vh;
+    display:block;
+}
+.panel{
+    position:absolute;
+    background:rgba(0,0,0,0.85);
+    border:1px solid #00ffcc;
+    border-radius:10px;
+    padding:10px;
+    overflow:auto;
+}
+#targets{
+    right:10px;
+    top:80px;
+    width:280px;
+    max-height:42vh;
+}
+#debug{
+    right:10px;
+    bottom:10px;
+    width:280px;
+    max-height:35vh;
+    font-size:11px;
+    color:#ffaa66;
+}
+#status{
+    left:10px;
+    bottom:10px;
+    width:280px;
+    font-size:12px;
+}
+.card{
+    border-bottom:1px solid #00ffcc;
+    margin-bottom:8px;
+    padding-bottom:8px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="topbar">
+<strong>AIS Marine Radar v3.4</strong>
+
+<select id="range">
+<option value="5">5 NM</option>
+<option value="10">10 NM</option>
+<option value="25" selected>25 NM</option>
+<option value="50">50 NM</option>
+<option value="100">100 NM</option>
+</select>
+
+<button id="gpsBtn">Acquire GPS</button>
+<button id="liveBtn">Live AIS OFF</button>
+
+<input id="apiKey" type="password" placeholder="AISStream API Key">
+
+</div>
+
+<canvas id="radarCanvas"></canvas>
+
+<div id="targets" class="panel">
+<h3>Targets</h3>
+<div id="targetList"></div>
+</div>
+
+<div id="debug" class="panel">
+<h3>Debug</h3>
+<div id="debugText"></div>
+</div>
+
+<div id="status" class="panel">
+Ready
+</div>
+
+<script>
+
+const canvas=document.getElementById('radarCanvas');
+const ctx=canvas.getContext('2d');
+
+const targetList=document.getElementById('targetList');
+const debugText=document.getElementById('debugText');
+const statusBox=document.getElementById('status');
+
+let w,h,cx,cy;
+let userPos=null;
+let socket=null;
+let liveAIS=false;
+let targets=[];
+
+let msgCount=0;
+let plotted=0;
+
+function resize(){
+    canvas.width=window.innerWidth;
+    canvas.height=window.innerHeight;
+    w=canvas.width;
+    h=canvas.height;
+    cx=w/2;
+    cy=h/2;
+}
+
+window.addEventListener('resize',resize);
+resize();
+
+function log(msg){
+    const d=document.createElement('div');
+    d.innerHTML=msg;
+    debugText.prepend(d);
+
+    while(debugText.children.length>30){
+        debugText.removeChild(debugText.lastChild);
+    }
+}
+
+function saveSettings(){
+    localStorage.setItem("ais_api_key",document.getElementById('apiKey').value);
+    localStorage.setItem("ais_range",document.getElementById('range').value);
+}
+
+function loadSettings(){
+    const k=localStorage.getItem("ais_api_key");
+    const r=localStorage.getItem("ais_range");
+
+    if(k) document.getElementById('apiKey').value=k;
+    if(r) document.getElementById('range').value=r;
+}
+
+loadSettings();
+
+function setStatus(txt){
+    statusBox.innerHTML=txt;
+}
+
+function draw(){
+
+    ctx.fillStyle="#081018";
+    ctx.fillRect(0,0,w,h);
+
+    const radius=Math.min(w,h)*0.38;
+
+    ctx.strokeStyle="#00ff88";
+
+    for(let i=1;i<=5;i++){
+        ctx.beginPath();
+        ctx.arc(cx,cy,radius*(i/5),0,Math.PI*2);
+        ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(cx-radius,cy);
+    ctx.lineTo(cx+radius,cy);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(cx,cy-radius);
+    ctx.lineTo(cx,cy+radius);
+    ctx.stroke();
+
+    ctx.fillStyle="#ffffff";
+    ctx.beginPath();
+    ctx.arc(cx,cy,7,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.fillText("YOUR BOAT",cx+10,cy-10);
+
+    targetList.innerHTML="";
+
+    const maxRange=parseFloat(document.getElementById('range').value);
+
+    plotted=0;
+
+    targets.forEach(t=>{
+
+        if(t.distance>maxRange) return;
+
+        plotted++;
+
+        const rr=(t.distance/maxRange)*radius;
+
+        const rad=(t.bearing-90)*(Math.PI/180);
+
+        const x=cx+Math.cos(rad)*rr;
+        const y=cy+Math.sin(rad)*rr;
+
+        ctx.fillStyle="#00ff00";
+
+        ctx.beginPath();
+        ctx.arc(x,y,5,0,Math.PI*2);
+        ctx.fill();
+
+        ctx.fillStyle="#ffffff";
+        ctx.fillText(t.name,x+8,y);
+
+        const div=document.createElement('div');
+
+        div.className="card";
+
+        div.innerHTML=`
+        <strong>${t.name}</strong><br>
+        ${t.distance.toFixed(1)} nm<br>
+        ${Math.round(t.bearing)}°
+        `;
+
+        targetList.appendChild(div);
+
+    });
+
+    setStatus(`
+    AIS: ${liveAIS ? "CONNECTED":"OFF"}<br>
+    Messages: ${msgCount}<br>
+    Targets: ${targets.length}<br>
+    Plotted: ${plotted}
+    `);
+
+    requestAnimationFrame(draw);
+}
+
+draw();
+
+document.getElementById('gpsBtn').addEventListener('click',()=>{
+
+    navigator.geolocation.getCurrentPosition(pos=>{
+
+        userPos={
+            lat:pos.coords.latitude,
+            lon:pos.coords.longitude
+        };
+
+        log("GPS OK");
+
+    },()=>{
+
+        alert("GPS failed");
+
+    },{
+        enableHighAccuracy:true
+    });
+
+});
+
+document.getElementById('liveBtn').addEventListener('click',()=>{
+
+    if(liveAIS){
+
+        liveAIS=false;
+
+        document.getElementById('liveBtn').textContent="Live AIS OFF";
+
+        if(socket){
+            socket.close();
+        }
+
+        return;
+    }
+
+    startAIS();
+
+});
+
+function startAIS(){
+
+    const key=document.getElementById('apiKey').value.trim();
+
+    if(!key){
+        alert("Enter API key");
+        return;
+    }
+
+    if(!userPos){
+        alert("Acquire GPS first");
+        return;
+    }
+
+    saveSettings();
+
+    targets=[];
+
+    socket=new WebSocket("wss://stream.aisstream.io/v0/stream");
+
+    socket.onopen=()=>{
+
+        liveAIS=true;
+
+        document.getElementById('liveBtn').textContent="Live AIS ON";
+
+        log("CONNECTED");
+
+        const sub={
+            APIKey:key,
+            BoundingBoxes:[[
+                [userPos.lat-2,userPos.lon-2],
+                [userPos.lat+2,userPos.lon+2]
+            ]]
+        };
+
+        socket.send(JSON.stringify(sub));
+
+    };
+
+    socket.onerror=()=>{
+
+        log("SOCKET ERROR");
+
+    };
+
+    socket.onclose=()=>{
+
+        liveAIS=false;
+
+        document.getElementById('liveBtn').textContent="Live AIS OFF";
+
+        log("DISCONNECTED");
+
+    };
+
+    socket.onmessage=(event)=>{
+
+        msgCount++;
+
+        // FIX: ignore non-string or heartbeat messages
+        if(typeof event.data !== "string"){
+            return;
+        }
+
+        // FIX: ignore blank data
+        if(!event.data.trim()){
+            return;
+        }
+
+        let data;
+
+        try{
+            data=JSON.parse(event.data);
+        }catch(e){
+
+            // FIX: no scrolling parse spam
+            return;
+        }
+
+        const meta=data.MetaData || {};
+        const msg=data.Message || {};
+
+        const pr=
+            msg.PositionReport ||
+            msg.StandardClassBPositionReport ||
+            msg.ExtendedClassBPositionReport;
+
+        if(!pr){
+            return;
+        }
+
+        const lat=
+            meta.latitude ??
+            pr.Latitude ??
+            pr.latitude;
+
+        const lon=
+            meta.longitude ??
+            pr.Longitude ??
+            pr.longitude;
+
+        if(lat===undefined || lon===undefined){
+            return;
+        }
+
+        const dist=distanceNM(
+            userPos.lat,
+            userPos.lon,
+            lat,
+            lon
+        );
+
+        const bearing=calculateBearing(
+            userPos.lat,
+            userPos.lon,
+            lat,
+            lon
+        );
+
+        const vessel={
+            id:
+                pr.UserID ||
+                meta.MMSI ||
+                Math.random(),
+
+            name:
+                meta.ShipName ||
+                ("MMSI "+(
+                    pr.UserID ||
+                    meta.MMSI ||
+                    "Unknown"
+                )),
+
+            distance:dist,
+            bearing:bearing
+        };
+
+        const idx=targets.findIndex(
+            t=>t.id===vessel.id
+        );
+
+        if(idx>=0){
+            targets[idx]=vessel;
+        }else{
+            targets.push(vessel);
+        }
+
+    };
+
+}
+
+function distanceNM(lat1,lon1,lat2,lon2){
+
+    const R=6371e3;
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dp=(lat2-lat1)*Math.PI/180;
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const a=
+        Math.sin(dp/2)*Math.sin(dp/2)+
+        Math.cos(p1)*Math.cos(p2)*
+        Math.sin(dl/2)*Math.sin(dl/2);
+
+    const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+
+    return (R*c)/1852;
+
+}
+
+function calculateBearing(lat1,lon1,lat2,lon2){
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const y=Math.sin(dl)*Math.cos(p2);
+
+    const x=
+        Math.cos(p1)*Math.sin(p2)-
+        Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+
+    let b=Math.atan2(y,x)*180/Math.PI;
+
+    return (b+360)%360;
+}
+
+</script>
+
+</body>
+</html>
