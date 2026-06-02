@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AIS Chart Radar v5.3 Zoom Fix</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+html,body{
+    margin:0;
+    width:100%;
+    height:100%;
+    background:#081018;
+    color:#00ffcc;
+    font-family:Arial,sans-serif;
+    overflow:hidden;
+}
+#map{
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    bottom:0;
+    z-index:1;
+}
+.leaflet-control-zoom{
+    margin-bottom:120px !important;
+    margin-left:10px !important;
+}
+#topbar{
+    position:absolute;
+    top:0;
+    left:0;
+    right:0;
+    background:rgba(16,32,48,.94);
+    padding:8px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+    z-index:1000;
+}
+button,input,select{
+    background:#183040;
+    color:#00ffcc;
+    border:1px solid #00ffcc;
+    padding:6px;
+    border-radius:5px;
+    font-size:13px;
+}
+.panel{
+    position:absolute;
+    background:rgba(0,0,0,.82);
+    border:1px solid #00ffcc;
+    border-radius:10px;
+    padding:8px;
+    overflow:auto;
+    z-index:900;
+}
+#targets{
+    right:10px;
+    top:78px;
+    width:290px;
+    max-height:42vh;
+}
+#alerts{
+    left:10px;
+    top:78px;
+    width:260px;
+    max-height:25vh;
+    color:#ff6666;
+}
+#status{
+    left:10px;
+    bottom:10px;
+    width:260px;
+    font-size:12px;
+}
+.card{
+    border-bottom:1px solid #00ffcc;
+    margin-bottom:6px;
+    padding-bottom:6px;
+}
+.vesselIcon{
+    width:0;
+    height:0;
+    border-left:8px solid transparent;
+    border-right:8px solid transparent;
+    border-bottom:18px solid #00ff00;
+    transform-origin:50% 70%;
+}
+.vesselDanger{
+    border-bottom-color:#ff0000;
+}
+.rangeLabel{
+    color:#00ffcc;
+    background:rgba(0,0,0,.65);
+    border:1px solid #00ffcc;
+    border-radius:4px;
+    padding:1px 4px;
+    font-size:11px;
+}
+@media(max-width:900px){
+    .leaflet-control-zoom{
+        margin-bottom:180px !important;
+        margin-left:10px !important;
+    }
+    #targets{
+        width:92vw;
+        left:4vw;
+        right:auto;
+        top:auto;
+        bottom:10px;
+        max-height:22vh;
+        font-size:11px;
+    }
+    #alerts{
+        width:92vw;
+        left:4vw;
+        top:66px;
+        max-height:15vh;
+        font-size:11px;
+    }
+    #status{
+        display:none;
+    }
+    #topbar{
+        padding:5px;
+        gap:4px;
+    }
+    button,input,select{
+        font-size:11px;
+        padding:5px;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<div id="topbar">
+<strong>AIS Chart Radar v5.3</strong>
+
+<select id="range">
+<option value="5">5 NM</option>
+<option value="10">10 NM</option>
+<option value="25" selected>25 NM</option>
+<option value="50">50 NM</option>
+</select>
+
+<select id="ringCount">
+<option value="1" selected>1 Ring</option>
+<option value="3">3 Rings</option>
+<option value="5">5 Rings</option>
+</select>
+
+<button id="gpsBtn">GPS OFF</button>
+<button id="liveBtn">AIS OFF</button>
+<button id="centerBtn">Center Boat</button>
+<button id="ringsBtn">Rings ON</button>
+<button id="trailBtn">Trails OFF</button>
+
+<input id="apiKey" type="password" placeholder="AISStream API Key">
+<button id="clearKeyBtn">Clear Key</button>
+</div>
+
+<div id="alerts" class="panel">
+<h3>Alerts</h3>
+<div id="alertList">No alerts</div>
+</div>
+
+<div id="targets" class="panel">
+<h3>Targets</h3>
+<div id="targetList"></div>
+</div>
+
+<div id="status" class="panel">Ready</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+let map;
+let boatMarker=null;
+let rangeRings=[];
+let rangeLabels=[];
+
+let socket=null;
+let liveAIS=false;
+let userPos=null;
+
+let targets=[];
+let vesselMarkers={};
+let trailLines={};
+let showTrails=false;
+let showRings=true;
+
+let msgCount=0;
+let parsedCount=0;
+
+const targetList=document.getElementById('targetList');
+const alertList=document.getElementById('alertList');
+const statusBox=document.getElementById('status');
+
+function initMap(){
+
+    map=L.map('map',{
+        zoomControl:false
+    }).setView([43.2557,-79.8711],11);
+
+    L.control.zoom({
+        position:'bottomleft'
+    }).addTo(map);
+
+    L.tileLayer(
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {
+            maxZoom:18,
+            attribution:'© OpenStreetMap contributors'
+        }
+    ).addTo(map);
+
+    L.tileLayer(
+        'https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',
+        {
+            maxZoom:18,
+            attribution:'Seamarks © OpenSeaMap contributors'
+        }
+    ).addTo(map);
+}
+
+initMap();
+
+function saveSettings(){
+    localStorage.setItem("ais_api_key",document.getElementById('apiKey').value);
+    localStorage.setItem("ais_range",document.getElementById('range').value);
+    localStorage.setItem("ais_ring_count",document.getElementById('ringCount').value);
+}
+
+function loadSettings(){
+    const k=localStorage.getItem("ais_api_key");
+    const r=localStorage.getItem("ais_range");
+    const rc=localStorage.getItem("ais_ring_count");
+
+    if(k){
+        document.getElementById('apiKey').value=k;
+    }
+
+    if(r){
+        document.getElementById('range').value=r;
+    }
+
+    if(rc){
+        document.getElementById('ringCount').value=rc;
+    }
+}
+
+loadSettings();
+
+document.getElementById('apiKey').addEventListener('input',saveSettings);
+document.getElementById('apiKey').addEventListener('change',saveSettings);
+
+document.getElementById('range').addEventListener('change',()=>{
+    saveSettings();
+    updateRangeRings();
+});
+
+document.getElementById('ringCount').addEventListener('change',()=>{
+    saveSettings();
+    updateRangeRings();
+});
+
+document.getElementById('clearKeyBtn').addEventListener('click',()=>{
+    localStorage.removeItem("ais_api_key");
+    document.getElementById('apiKey').value="";
+    alert("Saved API key cleared from this browser.");
+});
+
+document.getElementById('centerBtn').addEventListener('click',()=>{
+    if(userPos){
+        map.setView([userPos.lat,userPos.lon],13);
+    }else{
+        alert("Acquire GPS first.");
+    }
+});
+
+document.getElementById('ringsBtn').addEventListener('click',()=>{
+    showRings=!showRings;
+    document.getElementById('ringsBtn').textContent=showRings ? "Rings ON" : "Rings OFF";
+    updateRangeRings();
+});
+
+document.getElementById('trailBtn').addEventListener('click',()=>{
+    showTrails=!showTrails;
+    document.getElementById('trailBtn').textContent=showTrails ? "Trails ON" : "Trails OFF";
+
+    Object.values(trailLines).forEach(line=>{
+        if(showTrails){
+            line.addTo(map);
+        }else{
+            map.removeLayer(line);
+        }
+    });
+});
+
+function clearRangeRings(){
+    rangeRings.forEach(r=>map.removeLayer(r));
+    rangeLabels.forEach(l=>map.removeLayer(l));
+    rangeRings=[];
+    rangeLabels=[];
+}
+
+function destinationPoint(lat,lon,bearingDeg,distanceNm){
+    const R=6371000;
+    const d=distanceNm*1852;
+    const brng=bearingDeg*Math.PI/180;
+    const phi1=lat*Math.PI/180;
+    const lambda1=lon*Math.PI/180;
+
+    const phi2=Math.asin(
+        Math.sin(phi1)*Math.cos(d/R)+
+        Math.cos(phi1)*Math.sin(d/R)*Math.cos(brng)
+    );
+
+    const lambda2=lambda1+Math.atan2(
+        Math.sin(brng)*Math.sin(d/R)*Math.cos(phi1),
+        Math.cos(d/R)-Math.sin(phi1)*Math.sin(phi2)
+    );
+
+    return [phi2*180/Math.PI,lambda2*180/Math.PI];
+}
+
+function updateRangeRings(){
+
+    clearRangeRings();
+
+    if(!userPos || !showRings) return;
+
+    const maxRange=parseFloat(document.getElementById('range').value);
+    const ringCount=parseInt(document.getElementById('ringCount').value,10);
+
+    for(let i=1;i<=ringCount;i++){
+
+        const ringNm=(maxRange/ringCount)*i;
+        const isOuter=i===ringCount;
+
+        const ring=L.circle(
+            [userPos.lat,userPos.lon],
+            {
+                radius:ringNm*1852,
+                color:'#00ffcc',
+                weight:isOuter?2:1,
+                opacity:isOuter?0.9:0.45,
+                fill:false,
+                dashArray:isOuter?null:'4,6'
+            }
+        ).addTo(map);
+
+        rangeRings.push(ring);
+
+        const labelPos=destinationPoint(
+            userPos.lat,
+            userPos.lon,
+            45,
+            ringNm
+        );
+
+        const label=L.marker(
+            labelPos,
+            {
+                interactive:false,
+                icon:L.divIcon({
+                    className:'rangeLabel',
+                    html:ringNm.toFixed(ringNm<10?1:0)+' NM',
+                    iconSize:null
+                })
+            }
+        ).addTo(map);
+
+        rangeLabels.push(label);
+    }
+}
+
+document.getElementById('gpsBtn').addEventListener('click',()=>{
+
+    const btn=document.getElementById('gpsBtn');
+
+    if(!navigator.geolocation){
+        alert("GPS not supported on this browser.");
+        return;
+    }
+
+    btn.textContent="GPS ...";
+
+    navigator.geolocation.getCurrentPosition(
+        pos=>{
+            userPos={
+                lat:pos.coords.latitude,
+                lon:pos.coords.longitude
+            };
+
+            btn.textContent="GPS OK";
+
+            if(boatMarker){
+                map.removeLayer(boatMarker);
+            }
+
+            boatMarker=L.marker(
+                [userPos.lat,userPos.lon],
+                {title:"Your Boat"}
+            ).addTo(map).bindPopup("Your Boat");
+
+            map.setView([userPos.lat,userPos.lon],13);
+            updateRangeRings();
+
+            alert(
+                "GPS Locked\n\n"+
+                "Lat: "+userPos.lat.toFixed(5)+"\n"+
+                "Lon: "+userPos.lon.toFixed(5)
+            );
+        },
+        err=>{
+            btn.textContent="GPS FAIL";
+            alert(
+                "GPS Error\n\n"+
+                err.message+
+                "\n\nTip: GPS usually requires HTTPS, localhost, or an installed PWA."
+            );
+        },
+        {
+            enableHighAccuracy:true,
+            timeout:15000,
+            maximumAge:0
+        }
+    );
+});
+
+document.getElementById('liveBtn').addEventListener('click',()=>{
+    if(liveAIS){
+        stopAIS();
+        return;
+    }
+
+    startAIS();
+});
+
+function startAIS(){
+
+    const key=document.getElementById('apiKey').value.trim();
+
+    if(!key){
+        alert("Enter AISStream API key");
+        return;
+    }
+
+    if(!userPos){
+        alert("Acquire GPS first");
+        return;
+    }
+
+    saveSettings();
+
+    targets=[];
+    msgCount=0;
+    parsedCount=0;
+
+    socket=new WebSocket("wss://stream.aisstream.io/v0/stream");
+
+    socket.onopen=()=>{
+
+        liveAIS=true;
+        document.getElementById('liveBtn').textContent="AIS ON";
+
+        const sub={
+            APIKey:key,
+            BoundingBoxes:[[
+                [userPos.lat-2,userPos.lon-2],
+                [userPos.lat+2,userPos.lon+2]
+            ]]
+        };
+
+        socket.send(JSON.stringify(sub));
+    };
+
+    socket.onerror=()=>{
+        alert("AISStream connection error.");
+    };
+
+    socket.onclose=()=>{
+        liveAIS=false;
+        document.getElementById('liveBtn').textContent="AIS OFF";
+    };
+
+    socket.onmessage=(event)=>{
+        msgCount++;
+
+        if(event.data instanceof Blob){
+            const reader=new FileReader();
+            reader.onload=()=>{
+                processMessage(reader.result);
+            };
+            reader.readAsText(event.data);
+            return;
+        }
+
+        processMessage(event.data);
+    };
+}
+
+function stopAIS(){
+
+    liveAIS=false;
+    document.getElementById('liveBtn').textContent="AIS OFF";
+
+    if(socket){
+        socket.close();
+        socket=null;
+    }
+}
+
+function processMessage(raw){
+
+    if(!raw) return;
+
+    let data;
+
+    try{
+        data=JSON.parse(raw);
+    }catch(e){
+        return;
+    }
+
+    parsedCount++;
+
+    const meta=data.MetaData || {};
+    const msg=data.Message || {};
+
+    const pr=
+        msg.PositionReport ||
+        msg.StandardClassBPositionReport ||
+        msg.ExtendedClassBPositionReport;
+
+    if(!pr) return;
+
+    const lat=
+        meta.latitude ??
+        pr.Latitude ??
+        pr.latitude;
+
+    const lon=
+        meta.longitude ??
+        pr.Longitude ??
+        pr.longitude;
+
+    if(lat===undefined || lon===undefined) return;
+
+    const dist=distanceNM(userPos.lat,userPos.lon,lat,lon);
+    const bearing=calculateBearing(userPos.lat,userPos.lon,lat,lon);
+
+    const speed=Number(pr.Sog || pr.SpeedOverGround || 0);
+    const course=Number(pr.Cog || pr.CourseOverGround || 0);
+
+    const cpa=Math.max(0.05,dist*0.3);
+    const tcpa=Math.max(1,dist/(speed+0.1)*60);
+
+    const vessel={
+        id:pr.UserID || meta.MMSI || String(lat)+","+String(lon),
+        name:meta.ShipName || ("MMSI "+(pr.UserID || meta.MMSI || "Unknown")),
+        lat:lat,
+        lon:lon,
+        distance:dist,
+        bearing:bearing,
+        speed:speed,
+        course:course,
+        cpa:cpa,
+        tcpa:tcpa,
+        lastSeen:Date.now()
+    };
+
+    const idx=targets.findIndex(t=>t.id===vessel.id);
+
+    if(idx>=0){
+        targets[idx]=vessel;
+    }else{
+        targets.push(vessel);
+    }
+
+    updateVesselMarker(vessel);
+}
+
+function updateVesselMarker(v){
+
+    const danger=v.cpa<1 && v.tcpa<15;
+
+    const icon=L.divIcon({
+        className:'',
+        html:
+            '<div class="vesselIcon '+(danger?'vesselDanger':'')+
+            '" style="transform:rotate('+v.course+'deg)"></div>',
+        iconSize:[20,20],
+        iconAnchor:[10,10]
+    });
+
+    const popup=
+        '<strong>'+v.name+'</strong><br>'+
+        'Distance: '+v.distance.toFixed(1)+' nm<br>'+
+        'Speed: '+v.speed.toFixed(1)+' kn<br>'+
+        'Course: '+Math.round(v.course)+'°<br>'+
+        'CPA: '+v.cpa.toFixed(2)+' nm<br>'+
+        'TCPA: '+v.tcpa.toFixed(1)+' min';
+
+    if(vesselMarkers[v.id]){
+        vesselMarkers[v.id].setLatLng([v.lat,v.lon]);
+        vesselMarkers[v.id].setIcon(icon);
+        vesselMarkers[v.id].setPopupContent(popup);
+    }else{
+        vesselMarkers[v.id]=L.marker(
+            [v.lat,v.lon],
+            {icon:icon,title:v.name}
+        ).addTo(map).bindPopup(popup);
+    }
+
+    if(!trailLines[v.id]){
+        trailLines[v.id]=L.polyline([],{
+            color:danger?'red':'lime',
+            weight:2
+        });
+
+        if(showTrails){
+            trailLines[v.id].addTo(map);
+        }
+    }
+
+    const points=trailLines[v.id].getLatLngs();
+    points.push([v.lat,v.lon]);
+
+    if(points.length>20){
+        points.shift();
+    }
+
+    trailLines[v.id].setLatLngs(points);
+}
+
+function refreshPanels(){
+
+    const maxRange=parseFloat(document.getElementById('range').value);
+    const now=Date.now();
+
+    targets=targets.filter(t=>now-t.lastSeen<300000);
+
+    for(const id in vesselMarkers){
+        const exists=targets.find(t=>String(t.id)===String(id));
+
+        if(!exists){
+            map.removeLayer(vesselMarkers[id]);
+            delete vesselMarkers[id];
+
+            if(trailLines[id]){
+                map.removeLayer(trailLines[id]);
+                delete trailLines[id];
+            }
+        }
+    }
+
+    targetList.innerHTML="";
+    alertList.innerHTML="";
+
+    let dangerCount=0;
+
+    const visible=targets
+        .filter(t=>t.distance<=maxRange)
+        .sort((a,b)=>a.distance-b.distance);
+
+    visible.forEach(t=>{
+
+        const danger=t.cpa<1 && t.tcpa<15;
+
+        const div=document.createElement('div');
+        div.className='card';
+
+        div.innerHTML=
+            '<strong>'+t.name+'</strong><br>'+
+            t.distance.toFixed(1)+' nm | '+
+            t.speed.toFixed(1)+' kn<br>'+
+            'CPA '+t.cpa.toFixed(2)+' | '+
+            'TCPA '+t.tcpa.toFixed(1)+'m';
+
+        if(danger){
+            div.style.color="#ff6666";
+            dangerCount++;
+
+            const ad=document.createElement('div');
+            ad.innerHTML="⚠ "+t.name+" CPA "+t.cpa.toFixed(2);
+            alertList.appendChild(ad);
+        }
+
+        targetList.appendChild(div);
+    });
+
+    if(dangerCount===0){
+        alertList.innerHTML="No alerts";
+    }
+
+    statusBox.innerHTML=
+        'AIS: '+(liveAIS?'ON':'OFF')+'<br>'+
+        'GPS: '+(userPos?'LOCKED':'OFF')+'<br>'+
+        'Messages: '+msgCount+'<br>'+
+        'Parsed: '+parsedCount+'<br>'+
+        'Targets: '+targets.length+'<br>'+
+        'Visible: '+visible.length+'<br>'+
+        'Rings: '+(showRings?document.getElementById('ringCount').value:'OFF');
+
+    requestAnimationFrame(refreshPanels);
+}
+
+refreshPanels();
+
+function distanceNM(lat1,lon1,lat2,lon2){
+
+    const R=6371e3;
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dp=(lat2-lat1)*Math.PI/180;
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const a=
+        Math.sin(dp/2)**2+
+        Math.cos(p1)*Math.cos(p2)*
+        Math.sin(dl/2)**2;
+
+    const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+
+    return (R*c)/1852;
+}
+
+function calculateBearing(lat1,lon1,lat2,lon2){
+
+    const p1=lat1*Math.PI/180;
+    const p2=lat2*Math.PI/180;
+
+    const dl=(lon2-lon1)*Math.PI/180;
+
+    const y=Math.sin(dl)*Math.cos(p2);
+
+    const x=
+        Math.cos(p1)*Math.sin(p2)-
+        Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+
+    let b=Math.atan2(y,x)*180/Math.PI;
+
+    return (b+360)%360;
+}
+
+</script>
+
+</body>
+</html>
